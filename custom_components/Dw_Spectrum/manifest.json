@@ -1,0 +1,10 @@
+{
+  "domain": "dw_spectrum",
+  "name": "DW Spectrum IPVMS",
+  "version": "0.1.0",
+  "documentation": "https://dwspectrum.digital-watchdog.com/",
+  "requirements": [],
+  "codeowners": ["@igraph100"],
+  "config_flow": true,
+  "iot_class": "local_polling"
+}
