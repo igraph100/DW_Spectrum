@@ -17,7 +17,7 @@ from .api import DwSpectrumApi, DwSpectrumConfig
 from .coordinator import DwSpectrumCoordinator
 from .server_coordinator import DwSpectrumServerCoordinator
 
-PLATFORMS: list[str] = ["camera", "sensor", "switch"]
+PLATFORMS: list[str] = ["camera", "sensor", "switch", "select"]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:

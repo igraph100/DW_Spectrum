@@ -54,30 +54,6 @@ def _camera_device_info(entry: ConfigEntry, cam: dict[str, Any]) -> dict[str, An
     }
 
 
-def _schedule_mode(schedule: dict[str, Any]) -> str | None:
-    tasks = schedule.get("tasks") or []
-    if not isinstance(tasks, list) or not tasks:
-        return None
-
-    rec_types: set[str] = set()
-    meta_types: set[str] = set()
-
-    for t in tasks:
-        if not isinstance(t, dict):
-            continue
-        rec_types.add(str(t.get("recordingType", "")).strip())
-        meta_types.add(str(t.get("metadataTypes", "")).strip())
-
-    if rec_types == {"always"} and meta_types == {"none"}:
-        return "always"
-    if rec_types == {"metadataOnly"} and meta_types == {"motion"}:
-        return "motion"
-    if rec_types == {"metadataAndLowQuality"} and meta_types == {"motion"}:
-        return "motion_low"
-
-    return "unknown"
-
-
 # -----------------------
 # User attribute helpers
 # -----------------------
@@ -138,30 +114,7 @@ async def async_setup_entry(
     server: DwSpectrumServerCoordinator = hass.data[DOMAIN][entry.entry_id]["server_coordinator"]
 
     # -----------------------
-    # PERSISTED CACHE: recording mode
-    # -----------------------
-    store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.recording_mode_cache")
-    persisted = await store.async_load()
-    persisted = persisted if isinstance(persisted, dict) else {}
-
-    mode_cache: dict[str, str] = hass.data[DOMAIN][entry.entry_id].setdefault("recording_mode_cache", {})
-    for cam_id, mode in persisted.items():
-        if isinstance(cam_id, str) and isinstance(mode, str) and mode in ("always", "motion", "motion_low"):
-            mode_cache[cam_id] = mode
-
-    async def _save_mode_cache() -> None:
-        clean: dict[str, str] = {
-            k: v
-            for k, v in mode_cache.items()
-            if isinstance(k, str) and isinstance(v, str) and v in ("always", "motion", "motion_low")
-        }
-        await store.async_save(clean)
-
-    def schedule_save() -> None:
-        hass.async_create_task(_save_mode_cache())
-
-    # -----------------------
-    # PERSISTED CACHE: stream block
+    # PERSISTED CACHE: stream block (HA-side)
     # -----------------------
     stream_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.stream_block_cache")
     stream_persisted = await stream_store.async_load()
@@ -201,39 +154,16 @@ async def async_setup_entry(
             if not cam_id:
                 continue
 
-            # NEW: Live stream blocked switch (HA-side, persisted)
             key = f"{cam_id}:stream_blocked"
-            if key not in created_cam_keys:
-                created_cam_keys.add(key)
-                new_entities.append(
-                    DwSpectrumCameraStreamBlockedSwitch(
-                        entry, cams, cam_id, stream_block_cache, schedule_stream_save_and_notify
-                    )
-                )
+            if key in created_cam_keys:
+                continue
+            created_cam_keys.add(key)
 
-            # Recording disabled switch (DW schedule)
-            key = f"{cam_id}:disabled"
-            if key not in created_cam_keys:
-                created_cam_keys.add(key)
-                new_entities.append(
-                    DwSpectrumCameraRecordingDisabledSwitch(entry, cams, api, cam_id, mode_cache, schedule_save)
+            new_entities.append(
+                DwSpectrumCameraStreamBlockedSwitch(
+                    entry, cams, cam_id, stream_block_cache, schedule_stream_save_and_notify
                 )
-
-            # Mode switches
-            for mode_key, label in (
-                ("always", "Always Record"),
-                ("motion_low", "Motion + Low Res"),
-                ("motion", "Motion Only"),
-            ):
-                key = f"{cam_id}:{mode_key}"
-                if key in created_cam_keys:
-                    continue
-                created_cam_keys.add(key)
-                new_entities.append(
-                    DwSpectrumCameraRecordingModeSwitch(
-                        entry, cams, api, cam_id, label, mode_key, mode_cache, schedule_save
-                    )
-                )
+            )
 
         if new_entities:
             async_add_entities(new_entities, update_before_add=False)
@@ -335,7 +265,7 @@ class DwSpectrumUserEnabledSwitch(CoordinatorEntity[DwSpectrumServerCoordinator]
 
 
 # -----------------------
-# NEW: Live Stream Blocked switch (HA-side)
+# Live Stream Blocked switch (HA-side)
 # -----------------------
 class DwSpectrumCameraStreamBlockedSwitch(CoordinatorEntity[DwSpectrumCoordinator], SwitchEntity):
     """
@@ -385,129 +315,3 @@ class DwSpectrumCameraStreamBlockedSwitch(CoordinatorEntity[DwSpectrumCoordinato
         self._cache[self._camera_id] = False
         self._save_and_notify()
         self.async_write_ha_state()
-
-
-# -----------------------
-# Camera: Recording disabled switch (DW schedule)
-# -----------------------
-class DwSpectrumCameraRecordingDisabledSwitch(CoordinatorEntity[DwSpectrumCoordinator], SwitchEntity):
-    _attr_icon = "mdi:record-off"
-    _attr_has_entity_name = True
-    _attr_name = "Recording Disabled"
-
-    def __init__(
-        self,
-        entry: ConfigEntry,
-        coordinator: DwSpectrumCoordinator,
-        api,
-        camera_id: str,
-        mode_cache: dict[str, str],
-        save_cache: Callable[[], None],
-    ) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._api = api
-        self._camera_id = camera_id
-        self._mode_cache = mode_cache
-        self._save_cache = save_cache
-        self._attr_unique_id = f"{entry.entry_id}_cam_{camera_id}_rec_disabled"
-
-    def _get_camera(self) -> dict[str, Any] | None:
-        for cam in (self.coordinator.data or []):
-            if str(cam.get("id", "")).strip() == self._camera_id:
-                return cam
-        return None
-
-    @property
-    def device_info(self) -> dict[str, Any] | None:
-        cam = self._get_camera()
-        return _camera_device_info(self._entry, cam) if cam else None
-
-    @property
-    def is_on(self) -> bool:
-        cam = self._get_camera() or {}
-        schedule = cam.get("schedule") or {}
-        if not isinstance(schedule, dict):
-            return False
-        return not bool(schedule.get("isEnabled", False))
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        cam = self._get_camera() or {}
-        schedule = cam.get("schedule") or {}
-        if isinstance(schedule, dict) and schedule.get("isEnabled", False):
-            mode = _schedule_mode(schedule)
-            if mode in ("always", "motion", "motion_low"):
-                self._mode_cache[self._camera_id] = mode
-                self._save_cache()
-
-        await self._api.set_camera_schedule_enabled(self._camera_id, False)
-        await self.coordinator.async_request_refresh()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        mode = self._mode_cache.get(self._camera_id, "always")
-        await self._api.set_camera_recording_mode(self._camera_id, mode)
-        if mode in ("always", "motion", "motion_low"):
-            self._mode_cache[self._camera_id] = mode
-            self._save_cache()
-        await self.coordinator.async_request_refresh()
-
-
-# -----------------------
-# Camera recording mode switches
-# -----------------------
-class DwSpectrumCameraRecordingModeSwitch(CoordinatorEntity[DwSpectrumCoordinator], SwitchEntity):
-    _attr_icon = "mdi:record-rec"
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        entry: ConfigEntry,
-        coordinator: DwSpectrumCoordinator,
-        api,
-        camera_id: str,
-        label: str,
-        mode_key: str,
-        mode_cache: dict[str, str],
-        save_cache: Callable[[], None],
-    ) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._api = api
-        self._camera_id = camera_id
-        self._mode_key = mode_key
-        self._mode_cache = mode_cache
-        self._save_cache = save_cache
-
-        self._attr_name = label
-        self._attr_unique_id = f"{entry.entry_id}_cam_{camera_id}_rec_{mode_key}"
-
-    def _get_camera(self) -> dict[str, Any] | None:
-        for cam in (self.coordinator.data or []):
-            if str(cam.get("id", "")).strip() == self._camera_id:
-                return cam
-        return None
-
-    @property
-    def device_info(self) -> dict[str, Any] | None:
-        cam = self._get_camera()
-        return _camera_device_info(self._entry, cam) if cam else None
-
-    @property
-    def is_on(self) -> bool:
-        cam = self._get_camera() or {}
-        schedule = cam.get("schedule") or {}
-        if not isinstance(schedule, dict):
-            return False
-        if not schedule.get("isEnabled", False):
-            return False
-        mode = _schedule_mode(schedule)
-        return mode == self._mode_key
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._api.set_camera_recording_mode(self._camera_id, self._mode_key)
-        self._mode_cache[self._camera_id] = self._mode_key
-        self._save_cache()
-        await self.coordinator.async_request_refresh()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.async_request_refresh()
