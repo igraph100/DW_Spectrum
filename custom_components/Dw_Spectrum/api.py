@@ -39,6 +39,7 @@ class DwSpectrumApi:
             self._cfg.runtime_guid = f"ha-{uuid.uuid4()}"
 
         self._token: str | None = None
+        self._web_cookies: dict[str, str] = {}
 
     @property
     def base_url(self) -> str:
@@ -55,6 +56,35 @@ class DwSpectrumApi:
         if self._cfg.runtime_guid:
             headers["x-runtime-guid"] = self._cfg.runtime_guid
         return headers
+
+    def _web_cookie_header(self) -> str:
+        return "; ".join(f"{k}={v}" for k, v in self._web_cookies.items() if v)
+
+    def _store_response_cookies(self, resp: aiohttp.ClientResponse) -> None:
+        try:
+            for name, morsel in resp.cookies.items():
+                value = getattr(morsel, "value", None) or str(morsel)
+                if value:
+                    self._web_cookies[name] = value
+        except Exception:
+            pass
+
+    async def _parse_jsonish_response(self, resp: aiohttp.ClientResponse) -> Any:
+        """Return JSON when present, otherwise text/None.
+
+        Some DW web REST write calls respond with an empty body or non-JSON body even on success.
+        """
+        if resp.status == 204:
+            return None
+
+        text_body = await resp.text()
+        if not text_body or not text_body.strip():
+            return None
+
+        try:
+            return json.loads(text_body)
+        except Exception:
+            return text_body
 
     async def _parse_token(self, resp: aiohttp.ClientResponse) -> str:
         content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -108,6 +138,9 @@ class DwSpectrumApi:
                     body = (await resp.text()).strip()
                     raise DwSpectrumConnectionError(f"HTTP {resp.status}: {body}")
 
+                if set_cookie:
+                    self._store_response_cookies(resp)
+
                 token: str | None = None
                 try:
                     token = await self._parse_token(resp)
@@ -137,16 +170,21 @@ class DwSpectrumApi:
         params: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         retry_on_401: bool = True,
+        use_bearer: bool = True,
     ) -> Any:
         """Request helper for /web/rest endpoints.
 
-        These endpoints appear to work with bearer auth on some systems and with a session cookie on others,
-        so we try bearer first and then refresh a cookie-backed login if needed.
+        These endpoints appear to work with bearer auth on some systems and with a session cookie on others.
+        We try bearer first, then re-login with a cookie and retry *without* Authorization if needed.
         """
-        token = await self.ensure_token()
         headers = self._default_headers()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        cookie_header = self._web_cookie_header()
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        if use_bearer:
+            token = await self.ensure_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
         url = f"{self.base_url}{path}"
 
         try:
@@ -167,13 +205,15 @@ class DwSpectrumApi:
                         params=params,
                         json_body=json_body,
                         retry_on_401=False,
+                        use_bearer=False,
                     )
 
                 if resp.status >= 400:
                     body = (await resp.text()).strip()
                     raise DwSpectrumConnectionError(f"{method} {path} -> HTTP {resp.status}: {body}")
 
-                return await resp.json(content_type=None)
+                self._store_response_cookies(resp)
+                return await self._parse_jsonish_response(resp)
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise DwSpectrumConnectionError(str(err)) from err
@@ -490,6 +530,7 @@ class DwSpectrumApi:
 
         token = self._token
         self._token = None
+        self._web_cookies = {}
 
         url = f"{self.base_url}/rest/v3/login/sessions/{token}"
         headers = {**self._default_headers(), "Authorization": f"Bearer {token}"}

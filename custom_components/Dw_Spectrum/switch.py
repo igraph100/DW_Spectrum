@@ -168,7 +168,7 @@ async def async_setup_entry(
                 continue
 
             audio_key = f"{cam_id}:audio_enabled"
-            if _camera_audio_supported(cam) and audio_key not in created_cam_keys:
+            if audio_key not in created_cam_keys:
                 created_cam_keys.add(audio_key)
                 new_entities.append(DwSpectrumCameraAudioEnabledSwitch(entry, cams, api, cam_id))
 
@@ -309,8 +309,7 @@ class DwSpectrumCameraAudioEnabledSwitch(CoordinatorEntity[DwSpectrumCoordinator
 
     @property
     def available(self) -> bool:
-        cam = self._get_camera()
-        return bool(cam) and _camera_audio_supported(cam or {})
+        return self._get_camera() is not None
 
     @property
     def icon(self) -> str:

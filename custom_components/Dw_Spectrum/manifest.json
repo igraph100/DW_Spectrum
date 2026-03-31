@@ -1,7 +1,7 @@
 {
   "domain": "dw_spectrum",
   "name": "DW Spectrum IPVMS",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "documentation": "https://dwspectrum.digital-watchdog.com/",
   "requirements": [],
   "codeowners": [
