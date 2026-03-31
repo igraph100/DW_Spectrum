@@ -84,9 +84,9 @@ class DwSpectrumApi:
 
         return text_body.strip().strip('"')
 
-    async def login(self) -> str:
+    async def login(self, set_cookie: bool = False) -> str:
         url = f"{self.base_url}/rest/v3/login/sessions"
-        payload = {"username": self._cfg.username, "password": self._cfg.password, "setCookie": False}
+        payload = {"username": self._cfg.username, "password": self._cfg.password, "setCookie": bool(set_cookie)}
 
         try:
             async with self._session.post(
@@ -108,12 +108,72 @@ class DwSpectrumApi:
                     body = (await resp.text()).strip()
                     raise DwSpectrumConnectionError(f"HTTP {resp.status}: {body}")
 
-                token = await self._parse_token(resp)
-                if not token:
-                    raise DwSpectrumConnectionError("Login succeeded but no token returned")
+                token: str | None = None
+                try:
+                    token = await self._parse_token(resp)
+                except DwSpectrumConnectionError:
+                    if not set_cookie:
+                        raise
 
-                self._token = token
-                return token
+                if token:
+                    self._token = token
+                    return token
+
+                if set_cookie:
+                    # Some web REST calls rely on the aiohttp session cookie rather than a bearer token.
+                    return self._token or ""
+
+                raise DwSpectrumConnectionError("Login succeeded but no token returned")
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            raise DwSpectrumConnectionError(str(err)) from err
+
+
+    async def _request_json_web(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+        retry_on_401: bool = True,
+    ) -> Any:
+        """Request helper for /web/rest endpoints.
+
+        These endpoints appear to work with bearer auth on some systems and with a session cookie on others,
+        so we try bearer first and then refresh a cookie-backed login if needed.
+        """
+        token = await self.ensure_token()
+        headers = self._default_headers()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        url = f"{self.base_url}{path}"
+
+        try:
+            async with self._session.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=json_body,
+                timeout=aiohttp.ClientTimeout(total=25),
+                **self._request_kwargs(),
+            ) as resp:
+                if resp.status in (401, 403) and retry_on_401:
+                    await self.login(set_cookie=True)
+                    return await self._request_json_web(
+                        method,
+                        path,
+                        params=params,
+                        json_body=json_body,
+                        retry_on_401=False,
+                    )
+
+                if resp.status >= 400:
+                    body = (await resp.text()).strip()
+                    raise DwSpectrumConnectionError(f"{method} {path} -> HTTP {resp.status}: {body}")
+
+                return await resp.json(content_type=None)
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise DwSpectrumConnectionError(str(err)) from err
@@ -170,6 +230,7 @@ class DwSpectrumApi:
     # Devices / Cameras
     # -----------------------
     async def get_devices(self) -> list[dict[str, Any]]:
+        """Basic REST v3 inventory fallback."""
         params = {"_with": "id,name,deviceType,type,model,physicalId,logicalId,isOnline,status,schedule"}
         data = await self._request_json("GET", "/rest/v3/devices", params=params)
 
@@ -183,8 +244,52 @@ class DwSpectrumApi:
 
         raise DwSpectrumConnectionError("Unexpected /rest/v3/devices response shape")
 
+    async def get_web_devices(self, device_id: str | None = None) -> list[dict[str, Any]]:
+        """Camera inventory using the same web REST shape the Spectrum UI reads.
+
+        This is used so per-camera switches can see fields like options.isAudioEnabled.
+        Falls back to the v3 inventory if the web endpoint is unavailable.
+        """
+        params = {
+            "_keepDefault": "true",
+            "_with": (
+                "id,name,vendor,model,physicalId,url,serverId,status,typeId,capabilities,deviceType,"
+                "options.isAudioEnabled,options.isControlEnabled,options.isDualStreamingDisabled,"
+                "parameters.isAudioSupported,parameters.mediaCapabilities.hasAudio,parameters.audioCodec,"
+                "parameters.overrideAr,parameters.rotation,"
+                "motion.mask,motion.type,"
+                "schedule.isEnabled,schedule.tasks.dayOfWeek,schedule.tasks.endTime,"
+                "schedule.tasks.fps,schedule.tasks.metadataTypes,schedule.tasks.recordingType,"
+                "schedule.tasks.startTime,schedule.tasks.streamQuality"
+            ),
+        }
+        if device_id:
+            params["id"] = device_id
+
+        try:
+            data = await self._request_json_web("GET", "/web/rest/v2/devices", params=params)
+        except DwSpectrumConnectionError:
+            if device_id:
+                legacy = await self._request_json(
+                    "GET",
+                    f"/rest/v3/devices/{device_id}",
+                    params={"_with": "id,name,deviceType,type,model,physicalId,logicalId,isOnline,status,schedule"},
+                )
+                return [legacy] if isinstance(legacy, dict) else []
+            return await self.get_devices()
+
+        if isinstance(data, list):
+            return data
+
+        if isinstance(data, dict):
+            for key in ("items", "data", "devices"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+
+        raise DwSpectrumConnectionError("Unexpected /web/rest/v2/devices response shape")
+
     async def get_cameras(self) -> list[dict[str, Any]]:
-        devices = await self.get_devices()
+        devices = await self.get_web_devices()
         cams: list[dict[str, Any]] = []
         for d in devices:
             dt = str(d.get("deviceType", "")).lower()
@@ -194,6 +299,14 @@ class DwSpectrumApi:
         return cams
 
     async def get_device(self, device_id: str) -> dict[str, Any]:
+        # Prefer the web REST shape because it includes audio fields used by the new switch.
+        try:
+            devices = await self.get_web_devices(device_id)
+            if devices and isinstance(devices[0], dict):
+                return devices[0]
+        except DwSpectrumConnectionError:
+            pass
+
         data = await self._request_json(
             "GET",
             f"/rest/v3/devices/{device_id}",
@@ -301,6 +414,41 @@ class DwSpectrumApi:
             raise DwSpectrumConnectionError(f"Unknown recording mode: {mode}")
 
         await self.patch_device(device_id, {"schedule": {"isEnabled": True, "tasks": new_tasks}})
+
+
+    async def set_camera_audio_enabled(self, device_id: str, enabled: bool) -> None:
+        """Enable/disable camera audio using the same web REST call the UI makes.
+
+        The UI sends a partial device payload to /web/rest/v1/devices/{id}. We mirror that
+        request shape here because simple partial patches were not confirmed for this flag.
+        """
+        dev = await self.get_device(device_id)
+
+        motion = dev.get("motion") if isinstance(dev.get("motion"), dict) else {}
+        params = dev.get("parameters") if isinstance(dev.get("parameters"), dict) else {}
+        schedule = dev.get("schedule") if isinstance(dev.get("schedule"), dict) else {}
+
+        body: dict[str, Any] = {
+            "id": device_id,
+            "name": dev.get("name") or device_id,
+            "scheduleEnabled": bool(schedule.get("isEnabled", False)),
+            "options": {"isAudioEnabled": bool(enabled)},
+            "motion": {
+                "mask": motion.get("mask", ""),
+                "type": motion.get("type", "software"),
+            },
+            "parameters": {
+                "overrideAr": str(params.get("overrideAr", "")),
+                "rotation": str(params.get("rotation", "0")),
+            },
+        }
+
+        try:
+            await self._request_json_web("PATCH", f"/web/rest/v1/devices/{device_id}", json_body=body)
+            return
+        except DwSpectrumConnectionError:
+            # Fallback in case this server also accepts the option through REST v3.
+            await self.patch_device(device_id, {"options": {"isAudioEnabled": bool(enabled)}})
 
     # -----------------------
     # Server / Users / Licenses

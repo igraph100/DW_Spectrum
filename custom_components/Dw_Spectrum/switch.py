@@ -54,6 +54,19 @@ def _camera_device_info(entry: ConfigEntry, cam: dict[str, Any]) -> dict[str, An
     }
 
 
+def _camera_audio_supported(cam: dict[str, Any]) -> bool:
+    parameters = cam.get("parameters") if isinstance(cam.get("parameters"), dict) else {}
+    media_caps = parameters.get("mediaCapabilities") if isinstance(parameters.get("mediaCapabilities"), dict) else {}
+    options = cam.get("options") if isinstance(cam.get("options"), dict) else {}
+
+    return bool(
+        parameters.get("isAudioSupported")
+        or media_caps.get("hasAudio")
+        or parameters.get("audioCodec")
+        or ("isAudioEnabled" in options)
+    )
+
+
 # -----------------------
 # User attribute helpers
 # -----------------------
@@ -154,10 +167,15 @@ async def async_setup_entry(
             if not cam_id:
                 continue
 
-            key = f"{cam_id}:stream_blocked"
-            if key in created_cam_keys:
+            audio_key = f"{cam_id}:audio_enabled"
+            if _camera_audio_supported(cam) and audio_key not in created_cam_keys:
+                created_cam_keys.add(audio_key)
+                new_entities.append(DwSpectrumCameraAudioEnabledSwitch(entry, cams, api, cam_id))
+
+            block_key = f"{cam_id}:stream_blocked"
+            if block_key in created_cam_keys:
                 continue
-            created_cam_keys.add(key)
+            created_cam_keys.add(block_key)
 
             new_entities.append(
                 DwSpectrumCameraStreamBlockedSwitch(
@@ -261,6 +279,66 @@ class DwSpectrumUserEnabledSwitch(CoordinatorEntity[DwSpectrumServerCoordinator]
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._api.set_user_enabled(self._user_id, False)
+        await self.coordinator.async_request_refresh()
+
+
+# -----------------------
+# Camera audio enable switch (server-side)
+# -----------------------
+class DwSpectrumCameraAudioEnabledSwitch(CoordinatorEntity[DwSpectrumCoordinator], SwitchEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Audio"
+
+    def __init__(self, entry: ConfigEntry, coordinator: DwSpectrumCoordinator, api, camera_id: str) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._api = api
+        self._camera_id = camera_id
+        self._attr_unique_id = f"{entry.entry_id}_cam_{camera_id}_audio_enabled"
+
+    def _get_camera(self) -> dict[str, Any] | None:
+        for cam in (self.coordinator.data or []):
+            if str(cam.get("id", "")).strip() == self._camera_id:
+                return cam
+        return None
+
+    @property
+    def device_info(self) -> dict[str, Any] | None:
+        cam = self._get_camera()
+        return _camera_device_info(self._entry, cam) if cam else None
+
+    @property
+    def available(self) -> bool:
+        cam = self._get_camera()
+        return bool(cam) and _camera_audio_supported(cam or {})
+
+    @property
+    def icon(self) -> str:
+        return "mdi:volume-high" if self.is_on else "mdi:volume-off"
+
+    @property
+    def is_on(self) -> bool:
+        cam = self._get_camera() or {}
+        options = cam.get("options") if isinstance(cam.get("options"), dict) else {}
+        return bool(options.get("isAudioEnabled", False))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        cam = self._get_camera() or {}
+        parameters = cam.get("parameters") if isinstance(cam.get("parameters"), dict) else {}
+        return {
+            "camera_id": self._camera_id,
+            "audio_supported": _camera_audio_supported(cam),
+            "audio_codec": parameters.get("audioCodec"),
+            "raw_audio_flag": (cam.get("options") or {}).get("isAudioEnabled") if isinstance(cam.get("options"), dict) else None,
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._api.set_camera_audio_enabled(self._camera_id, True)
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._api.set_camera_audio_enabled(self._camera_id, False)
         await self.coordinator.async_request_refresh()
 
 
