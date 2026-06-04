@@ -11,7 +11,15 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    CONF_ENABLE_RTSP,
+    CONF_RTSP_MAIN_STREAM,
+    CONF_RTSP_SUB_STREAM,
+    DEFAULT_ENABLE_RTSP,
+    DEFAULT_RTSP_MAIN_STREAM,
+    DEFAULT_RTSP_SUB_STREAM,
+)
 from .coordinator import DwSpectrumCoordinator
 
 SIGNAL_STREAM_BLOCK_CHANGED = "dw_spectrum_stream_block_changed"
@@ -41,7 +49,18 @@ def _build_rtsp_url(entry: ConfigEntry, camera_id: str, stream_index: int) -> st
         userinfo = f"{u}:{p}@"
 
     cam_path_id = _strip_braces(str(camera_id))
-    return f"rtsp://{userinfo}{host}:{port}/{cam_path_id}?stream={int(stream_index)}"
+    return f"rtsp://{userinfo}{host}:{port}/{cam_path_id}?codec=H264&acodec=aac&stream={int(stream_index)}"
+
+
+def _get_rtsp_config(entry: ConfigEntry) -> dict:
+    """Return RTSP settings, preferring entry.options over entry.data."""
+    opts = entry.options or {}
+    data = entry.data or {}
+    return {
+        "enable": opts.get(CONF_ENABLE_RTSP, data.get(CONF_ENABLE_RTSP, DEFAULT_ENABLE_RTSP)),
+        "main": opts.get(CONF_RTSP_MAIN_STREAM, data.get(CONF_RTSP_MAIN_STREAM, DEFAULT_RTSP_MAIN_STREAM)),
+        "sub": opts.get(CONF_RTSP_SUB_STREAM, data.get(CONF_RTSP_SUB_STREAM, DEFAULT_RTSP_SUB_STREAM)),
+    }
 
 
 def _is_stream_blocked(hass: HomeAssistant, entry: ConfigEntry, camera_id: str) -> bool:
@@ -64,21 +83,32 @@ async def async_setup_entry(
 
     def add_entities_from_data() -> None:
         new_entities: list[Camera] = []
+        rtsp_cfg = _get_rtsp_config(entry)
 
         for dev in coordinator.data or []:
             cam_id = str(dev.get("id", "")).strip()
             if not cam_id:
                 continue
 
-            # 1) Existing thumbnail camera entity (kept)
+            # 1) Thumbnail camera entity (always created)
             uniq_thumb = f"{entry.entry_id}:{cam_id}:thumb"
             if uniq_thumb not in created:
                 created.add(uniq_thumb)
                 new_entities.append(DwSpectrumCamera(coordinator, dev, entry, hass))
 
-            # NOTE:
-            # Primary/Secondary RTSP stream camera entities REMOVED on purpose.
-            # (This prevents camera.*primary_stream and camera.*secondary_stream from being created.)
+            # 2) RTSP stream entities (only when explicitly enabled in config)
+            if rtsp_cfg["enable"]:
+                if rtsp_cfg["main"]:
+                    uniq_main = f"{entry.entry_id}:{cam_id}:rtsp:0"
+                    if uniq_main not in created:
+                        created.add(uniq_main)
+                        new_entities.append(DwSpectrumRtspStreamCamera(coordinator, dev, entry, hass, 0))
+
+                if rtsp_cfg["sub"]:
+                    uniq_sub = f"{entry.entry_id}:{cam_id}:rtsp:1"
+                    if uniq_sub not in created:
+                        created.add(uniq_sub)
+                        new_entities.append(DwSpectrumRtspStreamCamera(coordinator, dev, entry, hass, 1))
 
         if new_entities:
             async_add_entities(new_entities)
@@ -210,6 +240,11 @@ class DwSpectrumRtspStreamCamera(DwSpectrumBaseCamera):
     ) -> None:
         super().__init__(coordinator, dev, entry, hass)
         self._stream_index = int(stream_index)
+
+        # TCP transport is required for reliable audio. HA's Camera.__init__ sets
+        # stream_options = {} as a plain instance attribute, so we override it here
+        # after super().__init__() rather than using a @property.
+        self.stream_options = {"prefer_tcp": True}
 
         suffix = "Primary Stream" if self._stream_index == 0 else "Secondary Stream"
         self._attr_unique_id = f"{self._id}_rtsp_{self._stream_index}"

@@ -16,3 +16,10 @@ CONF_MOTION_TOKEN = "motion_token"
 CONF_ENABLE_MOTION_RULES = "enable_motion_rules"
 DEFAULT_ENABLE_MOTION_RULES = False
 MOTION_CALLBACK_PATH = "/api/dw_spectrum/motion"
+
+CONF_ENABLE_RTSP = "enable_rtsp"
+CONF_RTSP_MAIN_STREAM = "rtsp_main_stream"
+CONF_RTSP_SUB_STREAM = "rtsp_sub_stream"
+DEFAULT_ENABLE_RTSP = False
+DEFAULT_RTSP_MAIN_STREAM = False
+DEFAULT_RTSP_SUB_STREAM = False

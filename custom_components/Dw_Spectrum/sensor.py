@@ -14,7 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpda
 
 from .const import DOMAIN
 from .coordinator import DwSpectrumCoordinator
-from .server_coordinator import DwSpectrumServerCoordinator
+from .server_coordinator import DwSpectrumMetricsCoordinator, DwSpectrumServerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -237,39 +237,96 @@ class DwSpectrumCameraStatusCoordinator(DataUpdateCoordinator[dict[str, dict[str
 # Motion Coordinator
 # -----------------------
 class DwSpectrumMotionCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
-    """Callback-driven DW/Nx motion state per camera.
+    """Poll-based motion detection via /rest/v4/devices/{id}/footage?periodType=motion.
 
-    This does not poll and does not auto-clear. A camera returns to Not Detected
-    only when DW calls the stop/inactive callback rule.
+    Polls every 5 seconds. Motion is active if a period ended within the last
+    10 seconds (covers the poll gap) or has no end yet (durationMs == 0 / very large).
+    No DW event rules or callback URL required.
     """
+
+    POLL_SECONDS = 5
+    # A period is "active" if it ended within this window of now (ms).
+    # DW chunks average ~12s, so we need a window bigger than the max chunk
+    # to avoid missing ongoing motion between polls. 30s is safe.
+    ACTIVE_WINDOW_MS = 30_000
 
     def __init__(self, hass: HomeAssistant, api, cams_coordinator: DwSpectrumCoordinator) -> None:
         super().__init__(
             hass=hass,
             logger=_LOGGER,
-            name="dw_spectrum_motion_callbacks",
-            update_interval=None,
+            name="dw_spectrum_motion_poll",
+            update_interval=timedelta(seconds=self.POLL_SECONDS),
         )
         self._api = api
         self._cams = cams_coordinator
-        self._states: dict[str, dict[str, Any]] = {}
+        # Tracks webhook-set state: {cam_id: {"state": ..., "set_at_ms": ...}}
+        self._webhook_states: dict[str, dict[str, Any]] = {}
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
+        import time
         cameras = self._cams.data or []
-        cam_ids = [str(c.get("id", "")).strip().strip("{}") for c in cameras if isinstance(c, dict) and c.get("id")]
-        cleaned: dict[str, dict[str, Any]] = {}
-        for cid in cam_ids:
-            existing = self._states.get(cid) or {}
-            cleaned[cid] = {
-                "state": existing.get("state") or "Not Detected",
-                "last_motion_ms": existing.get("last_motion_ms"),
-                "last_stop_ms": existing.get("last_stop_ms"),
-                "last_event_ms": existing.get("last_event_ms"),
-                "source": existing.get("source") or "dw_rule_callback",
-                "raw": existing.get("raw"),
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - self.ACTIVE_WINDOW_MS
+        result: dict[str, dict[str, Any]] = {}
+
+        for cam in cameras:
+            if not isinstance(cam, dict):
+                continue
+            cid = str(cam.get("id", "")).strip().strip("{}")
+            if not cid:
+                continue
+            detected = False
+            last_motion_ms: int | None = None
+            try:
+                data = await self._api._request_json(
+                    "GET",
+                    f"/rest/v4/devices/{cid}/footage",
+                    params={
+                        "periodType":      "motion",
+                        "detailLevelMs":   "1000",
+                        "keepSmallChunks": "true",
+                        "startTimeMs":     str(start_ms),
+                        "endTimeMs":       str(now_ms),
+                    },
+                )
+                periods: list = data if isinstance(data, list) else []
+                for p in periods:
+                    if not isinstance(p, dict):
+                        continue
+                    s = p.get("startTimeMs")
+                    d = p.get("durationMs")
+                    if s is None:
+                        continue
+                    s = int(s)
+                    # durationMs == 0 means still ongoing; otherwise check end time
+                    if d is None or int(d) == 0:
+                        detected = True
+                        last_motion_ms = s
+                    else:
+                        end_ms = s + int(d)
+                        if end_ms >= start_ms:
+                            detected = True
+                            if last_motion_ms is None or s > last_motion_ms:
+                                last_motion_ms = s
+            except Exception:  # noqa: BLE001
+                pass
+
+            # If the webhook recently set Detected, trust it over the poll
+            # (ongoing motion won't appear in footage API until the chunk closes)
+            webhook = self._webhook_states.get(cid)
+            if webhook and webhook.get("state") == "Detected":
+                age_ms = now_ms - webhook.get("set_at_ms", 0)
+                if age_ms < self.ACTIVE_WINDOW_MS:
+                    detected = True
+                    last_motion_ms = last_motion_ms or webhook.get("last_motion_ms")
+
+            result[cid] = {
+                "state": "Detected" if detected else "Not Detected",
+                "last_motion_ms": last_motion_ms,
+                "source": "webhook" if (webhook and webhook.get("state") == "Detected" and not detected) else "api_poll",
             }
-        self._states = cleaned
-        return dict(cleaned)
+
+        return result
 
     async def async_set_motion(
         self,
@@ -280,23 +337,244 @@ class DwSpectrumMotionCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]
         event_key: str,
         raw: dict[str, Any] | None = None,
     ) -> None:
+        """Called by the webhook callback when a DW rule fires.
+
+        Updates state immediately and records the webhook time so the poll
+        doesn't override an active detection before the footage chunk closes.
+        """
+        import time
         cid = str(camera_id or "").strip().strip("{}")
         if not cid:
             return
-        existing = dict(self._states.get(cid) or {})
-        existing["state"] = state
-        existing["last_event_ms"] = event_ms
-        existing["source"] = "dw_rule_callback"
-        existing["raw"] = raw
-        if event_key == "last_motion_ms":
-            existing["last_motion_ms"] = event_ms
-        elif event_key == "last_stop_ms":
-            existing["last_stop_ms"] = event_ms
-        self._states[cid] = existing
-
+        now_ms = int(time.time() * 1000)
+        detected = state == "Detected"
+        self._webhook_states[cid] = {
+            "state": state,
+            "set_at_ms": now_ms,
+            "last_motion_ms": event_ms if detected else None,
+        }
         data = dict(self.data or {})
-        data[cid] = existing
+        data[cid] = {
+            "state": state,
+            "last_motion_ms": event_ms if event_key == "last_motion_ms" else (data.get(cid) or {}).get("last_motion_ms"),
+            "source": "webhook",
+        }
         self.async_set_updated_data(data)
+
+
+# -----------------------
+# Server health sensor
+# -----------------------
+def _parse_alarms(alarms: dict[str, Any]) -> tuple[str, list[str], list[str]]:
+    """Parse /rest/v4/metrics/alarms into (state, errors, warnings).
+
+    The alarms payload looks like::
+
+        {
+          "devices": {
+            "<id>": {
+              "availability": {"status": [{"level": "error", "text": "is offline"}]},
+              "secondaryStream": {"resolution": [{"level": "warning", "text": "..."}]}
+            }
+          },
+          "storages": {
+            "<id>": {"state": {"issues24h": [{"level": "error", "text": "..."}]}}
+          }
+        }
+
+    Returns ``("Critical"|"Warning"|"Healthy", [error texts], [warning texts])``.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    def _walk(obj: Any) -> None:
+        if isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, dict) and "level" in item:
+                    level = str(item.get("level") or "").lower()
+                    text = str(item.get("text") or "").strip()
+                    if level == "error" and text:
+                        errors.append(text)
+                    elif level == "warning" and text:
+                        warnings.append(text)
+                else:
+                    _walk(item)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                _walk(v)
+
+    _walk(alarms)
+
+    if errors:
+        state = "Critical"
+    elif warnings:
+        state = "Warning"
+    else:
+        state = "Healthy"
+
+    return state, errors, warnings
+
+
+def _metrics_load_attrs(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Extract CPU/RAM/stream attributes from /rest/v4/metrics/values."""
+    servers = metrics.get("servers") or {}
+    first_server = next(iter(servers.values()), {}) if servers else {}
+    load = first_server.get("load") or {}
+
+    def pct(val: Any) -> float | None:
+        return round(float(val) * 100, 1) if isinstance(val, (int, float)) else None
+
+    return {
+        "cpu_usage_pct": pct(load.get("cpuUsageP")),
+        "ram_usage_pct": pct(load.get("ramUsageP")),
+        "server_cpu_pct": pct(load.get("serverCpuUsageP")),
+        "server_ram_pct": pct(load.get("serverRamUsageP")),
+        "active_streams": (load.get("primaryStreams") or 0) + (load.get("secondaryStreams") or 0),
+        "primary_streams": load.get("primaryStreams"),
+        "secondary_streams": load.get("secondaryStreams"),
+        "devices_connected": load.get("devices"),
+    }
+
+
+class DwSpectrumServerHealthSensor(CoordinatorEntity[DwSpectrumMetricsCoordinator], SensorEntity):
+    """Single sensor on the server device showing overall health status.
+
+    State comes from GET /rest/v4/metrics/alarms (the same source as the
+    VMS web UI health page).  Attributes include CPU/RAM from metrics/values.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:server-network"
+
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        metrics_coordinator: DwSpectrumMetricsCoordinator,
+        server_coordinator: DwSpectrumServerCoordinator,
+    ) -> None:
+        super().__init__(metrics_coordinator)
+        self._entry = entry
+        self._server_coordinator = server_coordinator
+        self._attr_name = "Server Health"
+        self._attr_unique_id = f"{entry.entry_id}_server_health"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        system_info = (self._server_coordinator.data or {}).get("system_info")
+        return _server_device_info(self._entry, system_info)
+
+    @property
+    def native_value(self) -> str:
+        alarms = (self.coordinator.data or {}).get("alarms") or {}
+        state, _, _ = _parse_alarms(alarms)
+        return state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        alarms = data.get("alarms") or {}
+        metrics = data.get("metrics") or {}
+        _, errors, warnings = _parse_alarms(alarms)
+        attrs = _metrics_load_attrs(metrics)
+        attrs["errors"] = errors or None
+        attrs["warnings"] = warnings or None
+        return attrs
+
+
+# -----------------------
+# Server update sensor
+# -----------------------
+class DwSpectrumServerUpdateSensor(CoordinatorEntity[DwSpectrumMetricsCoordinator], SensorEntity):
+    """Sensor showing whether a software update is available for the VMS server.
+
+    State: ``Up to date`` | ``Update available`` | ``Downloading`` | ``Installing`` | ``Error``
+
+    Derived from:
+    - ``GET /rest/v4/update/info``  — available version, release notes, date
+    - ``GET /rest/v4/update``       — current install state/progress per server
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:update"
+
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        metrics_coordinator: DwSpectrumMetricsCoordinator,
+        server_coordinator: DwSpectrumServerCoordinator,
+    ) -> None:
+        super().__init__(metrics_coordinator)
+        self._entry = entry
+        self._server_coordinator = server_coordinator
+        self._attr_name = "Software Update"
+        self._attr_unique_id = f"{entry.entry_id}_server_update"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        system_info = (self._server_coordinator.data or {}).get("system_info")
+        return _server_device_info(self._entry, system_info)
+
+    def _data(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        d = self.coordinator.data or {}
+        return d.get("update_info") or {}, d.get("update_status") or {}
+
+    @property
+    def native_value(self) -> str:
+        info, status = self._data()
+
+        # Check active install state from any server entry
+        for server_status in status.values():
+            if not isinstance(server_status, dict):
+                continue
+            state = str(server_status.get("state") or "").lower()
+            error = str(server_status.get("error") or "").lower()
+            if error and error != "noerror":
+                return "Error"
+            if state in ("downloading", "preparing"):
+                return "Downloading"
+            if state in ("installing", "readytoinstall"):
+                return "Installing"
+
+        # No active install — check if an update version is available
+        available_version = str(info.get("version") or "").strip()
+        if available_version:
+            return "Update available"
+
+        return "Up to date"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        info, status = self._data()
+
+        release_date: str | None = None
+        release_date_ms = info.get("releaseDateMs")
+        if release_date_ms and int(release_date_ms) > 0:
+            try:
+                from datetime import datetime, timezone
+                release_date = datetime.fromtimestamp(int(release_date_ms) / 1000, tz=timezone.utc).isoformat()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Flatten per-server progress (usually one server)
+        progress: int | None = None
+        install_state: str | None = None
+        install_message: str | None = None
+        for server_status in status.values():
+            if isinstance(server_status, dict):
+                progress = server_status.get("progress")
+                install_state = server_status.get("state")
+                install_message = server_status.get("message") or None
+                break
+
+        return {
+            "available_version": str(info.get("version") or "").strip() or None,
+            "release_date": release_date,
+            "release_notes_url": str(info.get("releaseNotesUrl") or "").strip() or None,
+            "description": str(info.get("description") or "").strip() or None,
+            "install_state": install_state,
+            "install_progress_pct": progress,
+            "install_message": install_message,
+        }
 
 
 # -----------------------
@@ -314,6 +592,12 @@ async def async_setup_entry(
     # Ensure initial data exists
     await cams.async_config_entry_first_refresh()
     await server.async_config_entry_first_refresh()
+
+    # Create/reuse metrics coordinator
+    metrics_coord: DwSpectrumMetricsCoordinator | None = hass.data[DOMAIN][entry.entry_id].get("metrics_coordinator")
+    if metrics_coord is None:
+        metrics_coord = DwSpectrumMetricsCoordinator(hass, api)
+        hass.data[DOMAIN][entry.entry_id]["metrics_coordinator"] = metrics_coord
 
     # Create/reuse single coordinators per config entry
     status_coord: DwSpectrumCameraStatusCoordinator | None = hass.data[DOMAIN][entry.entry_id].get("status_coordinator")
@@ -334,12 +618,15 @@ async def async_setup_entry(
     await status_coord.async_config_entry_first_refresh()
     await lpr_coord.async_config_entry_first_refresh()
     await motion_coord.async_config_entry_first_refresh()
+    await metrics_coord.async_config_entry_first_refresh()
 
     entities: list[SensorEntity] = [
         DwSpectrumCameraCountSensor(entry, cams, server),
         DwSpectrumLicenseTotalSensor(entry, server),
         DwSpectrumLicenseUsedSensor(entry, server),
         DwSpectrumLicenseAvailableSensor(entry, server),
+        DwSpectrumServerHealthSensor(entry, metrics_coord, server),
+        DwSpectrumServerUpdateSensor(entry, metrics_coord, server),
     ]
 
     # Add per-camera status/LPR sensors
@@ -688,15 +975,8 @@ class DwSpectrumCameraLastPlateSensor(_BaseLprSensor):
             "list_status": payload.get("list_status"),
             "confidence": payload.get("confidence"),
             "has_capture": payload.get("has_capture"),
-            "country": norm.get("licenseplatecountry") or norm.get("country"),
-            "lane": norm.get("lane"),
-            "direction": norm.get("direction"),
-            "vehicle_type": norm.get("type"),
-            "color": norm.get("color"),
-            "brand": norm.get("brand"),
-            "best_shot": payload.get("best_shot"),
-            "attributes": raw_attrs,
         }
+
         return attrs
 
 
@@ -716,7 +996,7 @@ class DwSpectrumCameraLastPlateSeenSensor(_BaseLprSensor):
         self._attr_unique_id = f"{entry.entry_id}_cam_{camera_id}_lpr_last_seen"
 
     @property
-    def native_value(self) -> datetime | None:
+    def native_value(self):
         payload = self._payload()
         seen_ms = payload.get("seen_ms")
         if seen_ms is None:
@@ -729,10 +1009,7 @@ class DwSpectrumCameraLastPlateSeenSensor(_BaseLprSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         payload = self._payload()
-        if not payload:
-            return {}
         return {
             "plate": payload.get("plate"),
-            "recognized": bool(payload.get("recognized", False)),
             "track_id": payload.get("track_id"),
         }

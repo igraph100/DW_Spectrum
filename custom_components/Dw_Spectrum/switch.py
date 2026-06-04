@@ -94,22 +94,46 @@ def _pick(u: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+# Permission tokens from /rest/v4/users/{id}/permissions ordered by privilege level.
+# The highest-privilege token present wins.
+_PERMISSION_ROLE_MAP: list[tuple[str, str]] = [
+    ("administrator", "Administrator"),
+    ("poweruser", "Power User"),
+    ("viewarchive", "Advanced Viewer"),
+    ("viewbookmarks", "Viewer"),
+    ("view", "Live Viewer"),
+]
+
+
+def _role_from_permissions(permissions_str: str) -> str | None:
+    """Parse a pipe-delimited DW permissions string and return the primary role label."""
+    if not permissions_str:
+        return None
+    tokens = {p.strip().lower() for p in permissions_str.split("|") if p.strip()}
+    for token, label in _PERMISSION_ROLE_MAP:
+        if token in tokens:
+            return label
+    return None
+
+
 def _infer_user_role(u: dict[str, Any]) -> str | None:
-    for k in ("role", "userRole", "user_role", "type", "userType", "group", "userGroup", "accessRole"):
+    # 1. Group name from /rest/v4/userGroups — covers both built-in groups
+    #    ("Power Users", "Administrators") and any custom roles the admin created.
+    group_name = u.get("_dw_group_name")
+    if isinstance(group_name, str) and group_name.strip():
+        return group_name.strip()
+
+    # 2. Parse the permissions string — fallback when no group is resolved
+    #    (e.g. older server that doesn't support /rest/v4/userGroups).
+    role = _role_from_permissions(str(u.get("_dw_permissions") or ""))
+    if role:
+        return role
+
+    # 3. Last resort — explicit role fields only, never "type"/"userType" (those = cloud/local).
+    for k in ("role", "userRole", "user_role", "userGroup", "accessRole"):
         v = u.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
-
-    if _as_bool(u.get("isAdmin")) is True or _as_bool(u.get("admin")) is True:
-        return "admin"
-    if _as_bool(u.get("isPowerUser")) is True:
-        return "power_user"
-    if _as_bool(u.get("isLiveViewer")) is True:
-        return "live_viewer"
-
-    v = u.get("roleId") or u.get("role_id") or u.get("accessLevel")
-    if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
-        return str(v)
 
     return None
 
@@ -251,13 +275,20 @@ class DwSpectrumUserEnabledSwitch(CoordinatorEntity[DwSpectrumServerCoordinator]
     def extra_state_attributes(self) -> dict[str, Any]:
         u = self._user if isinstance(self._user, dict) else {}
 
+        # Resolved group name(s) from the /rest/v4/userGroups lookup.
+        group_names: list[str] = u.get("_dw_group_names") or []
+        group_name: str | None = u.get("_dw_group_name") or (group_names[0] if group_names else None)
+
         attrs: dict[str, Any] = {
             "user_id": self._user_id,
             "full_name": _pick(u, "fullName", "name", "displayName"),
             "username": _pick(u, "username", "login", "userName"),
             "email": _pick(u, "email", "userEmail", "mail"),
             "role": _infer_user_role(u),
-            "group": _pick(u, "group", "userGroup"),
+            "permissions": u.get("_dw_permissions") or None,
+            "group_name": group_name,
+            "group_names": group_names if len(group_names) > 1 else None,
+            "user_type": _pick(u, "type", "userType"),
             "cloud_user": _as_bool(_pick(u, "isCloud", "cloud", "cloudUser", "isCloudUser")),
             "enabled": bool(u.get("isEnabled", False)),
             "is_admin": _as_bool(_pick(u, "isAdmin", "admin")),

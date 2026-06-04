@@ -27,7 +27,7 @@ class DwSpectrumConnectionError(Exception):
 @dataclass
 class DwSpectrumConfig:
     host: str
-    port: int
+    port: int | None
     ssl: bool
     verify_ssl: bool
     username: str
@@ -51,7 +51,9 @@ class DwSpectrumApi:
     @property
     def base_url(self) -> str:
         scheme = "https" if self._cfg.ssl else "http"
-        return f"{scheme}://{self._cfg.host}:{self._cfg.port}"
+        if self._cfg.port:
+            return f"{scheme}://{self._cfg.host}:{self._cfg.port}"
+        return f"{scheme}://{self._cfg.host}"
 
     def _request_kwargs(self) -> dict[str, Any]:
         if self._cfg.ssl:
@@ -498,13 +500,18 @@ class DwSpectrumApi:
         raise DwSpectrumConnectionError("Unexpected /rest/v3/devices/{id}/status response shape")
 
     async def get_device_image(self, device_id: str) -> bytes | None:
+        # Normalize: strip surrounding braces that some DW versions include in IDs.
+        device_id = str(device_id or "").strip().strip("{}")
         token = await self.ensure_token()
         headers = {
             "Authorization": f"Bearer {token}",
             "accept": "image/jpeg,image/png,*/*",
             **({"x-runtime-guid": self._cfg.runtime_guid} if self._cfg.runtime_guid else {}),
         }
-        url = f"{self.base_url}/rest/v3/devices/{device_id}/image"
+        url = (
+            f"{self.base_url}/rest/v4/devices/{device_id}/image"
+            "?timestampMs=-1&format=jpg&roundMethod=precise&stream&size=426x240"
+        )
 
         try:
             async with self._session.get(
@@ -886,7 +893,7 @@ class DwSpectrumApi:
         return result
 
     async def get_users(self) -> list[dict[str, Any]]:
-        params = {"_with": "id,name,fullName,email,type,isEnabled,permissions,attributes"}
+        params = {"_with": "id,name,fullName,email,type,isEnabled,permissions,groupIds,attributes"}
         data = await self._request_json("GET", "/rest/v3/users", params=params)
 
         if isinstance(data, list):
@@ -902,6 +909,23 @@ class DwSpectrumApi:
     async def set_user_enabled(self, user_id: str, enabled: bool) -> None:
         _ = await self._request_json("PATCH", f"/rest/v3/users/{user_id}", json_body={"isEnabled": enabled})
 
+    async def get_user_groups(self) -> list[dict[str, Any]]:
+        """Return user groups from REST v4, falling back to v3."""
+        for path in ("/rest/v4/userGroups", "/rest/v3/userGroups"):
+            try:
+                data = await self._request_json("GET", path)
+            except DwSpectrumConnectionError:
+                continue
+            if isinstance(data, list):
+                return [g for g in data if isinstance(g, dict)]
+            if isinstance(data, dict):
+                for key in ("items", "data", "groups", "userGroups"):
+                    if isinstance(data.get(key), list):
+                        return [g for g in data[key] if isinstance(g, dict)]
+            if data is not None:
+                return []
+        return []
+
     async def get_license_summary(self) -> dict[str, Any]:
         data = await self._request_json("GET", "/rest/v3/licenses/*/summary")
         if isinstance(data, dict):
@@ -909,6 +933,68 @@ class DwSpectrumApi:
         if isinstance(data, list):
             return {"items": data}
         return {"raw": data}
+
+    async def get_server_alarms(self) -> dict[str, Any]:
+        """Fetch /rest/v4/metrics/alarms — real health alerts shown in the VMS health UI.
+
+        Returns a dict with keys ``devices`` and ``storages``, each mapping an id to
+        a dict of category → list of ``{"level": "error"|"warning", "text": "..."}``.
+        Falls back to empty dict on error.
+        """
+        try:
+            data = await self._request_jsonish_any_auth("GET", "/rest/v4/metrics/alarms")
+        except DwSpectrumConnectionError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def get_webrtc_ticket(self) -> str:
+        """POST /rest/v3/login/tickets — returns a short-lived vmsTicket token (~600s).
+
+        The ticket is used as ``?_ticket=<value>`` on the WebRTC WebSocket URL so
+        the browser can authenticate without embedding a long-lived bearer token in
+        a URL visible in browser devtools.
+        """
+        data = await self._request_jsonish_any_auth("POST", "/rest/v3/login/tickets", json_body={})
+        if isinstance(data, dict):
+            token = data.get("token")
+            if token:
+                return str(token)
+        raise DwSpectrumConnectionError("Failed to obtain WebRTC ticket")
+
+    async def get_server_update_info(self) -> dict[str, Any]:
+        """Fetch /rest/v4/update/info — available update version, release notes, date.
+
+        Returns empty dict when no update is available (all fields blank/zero).
+        """
+        try:
+            data = await self._request_jsonish_any_auth("GET", "/rest/v4/update/info")
+        except DwSpectrumConnectionError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def get_server_update_status(self) -> dict[str, Any]:
+        """Fetch /rest/v4/update — per-server update state/progress.
+
+        Returns dict keyed by server id with fields: state, error, message, progress.
+        """
+        try:
+            data = await self._request_jsonish_any_auth("GET", "/rest/v4/update")
+        except DwSpectrumConnectionError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def get_server_metrics(self) -> dict[str, Any]:
+        """Fetch /rest/v4/metrics/values.
+
+        Returns the full metrics payload which includes top-level keys:
+        ``devices``, ``networkInterfaces``, ``servers``, ``sites``, ``storages``.
+        Falls back to an empty dict on error so callers can handle gracefully.
+        """
+        try:
+            data = await self._request_jsonish_any_auth("GET", "/rest/v4/metrics/values")
+        except DwSpectrumConnectionError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     # -----------------------
     # LPR / Analytics helpers
