@@ -561,10 +561,12 @@ async def _ws_get_info(hass: HomeAssistant, connection, msg: dict) -> None:
                 else await api.get_cameras()
             )
 
+            stream_block_cache = entry_data.get("stream_block_cache") or {}
             cameras = [
                 {
                     "id": str(c.get("id", "")).strip().strip("{}"),
                     "name": str(c.get("name") or c.get("id") or ""),
+                    "stream_blocked": bool(stream_block_cache.get(str(c.get("id", "")).strip().strip("{}"))),
                 }
                 for c in raw_cameras
                 if c.get("id")
