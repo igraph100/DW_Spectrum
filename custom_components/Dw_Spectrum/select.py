@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
+from .api import DwSpectrumConnectionError
 from .const import DOMAIN
 from .coordinator import DwSpectrumCoordinator
 
@@ -343,12 +344,40 @@ class DwSpectrumCameraRecordingModeSelect(CoordinatorEntity[DwSpectrumCoordinato
         if mode_key is None:
             return
 
-        if mode_key == "disabled":
-            await self._api.set_camera_schedule_enabled(self._camera_id, False)
-            await self.coordinator.async_request_refresh()
-            return
+        try:
+            if mode_key == "disabled":
+                await self._api.set_camera_schedule_enabled(self._camera_id, False)
+            else:
+                await self._api.set_camera_recording_mode(self._camera_id, mode_key)
+        except DwSpectrumConnectionError as err:
+            # The server rejects recording changes for cameras that cannot
+            # record: HTTP 403 "no license to enable recording", or HTTP 400
+            # for invalid/incomplete devices. Skip the camera with a warning
+            # instead of raising, so automations that target multiple cameras
+            # keep running. Real connectivity errors (server unreachable,
+            # auth, 5xx) are still raised.
+            err_text = str(err)
+            if "HTTP 403" in err_text or "HTTP 400" in err_text:
+                cam = self._get_camera() or {}
+                cam_name = cam.get("name") or self._camera_id
+                if "license" in err_text.lower():
+                    _LOGGER.warning(
+                        "DW Spectrum: camera '%s' did not change to '%s' because it "
+                        "doesn't have a recording license. Skipping.",
+                        cam_name,
+                        option,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "DW Spectrum: camera '%s' did not change to '%s'; the server "
+                        "rejected the change. Skipping. Error: %s",
+                        cam_name,
+                        option,
+                        err,
+                    )
+                return
+            raise
 
-        await self._api.set_camera_recording_mode(self._camera_id, mode_key)
         await self.coordinator.async_request_refresh()
 
 
