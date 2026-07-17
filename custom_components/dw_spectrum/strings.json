@@ -1,0 +1,128 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "DW Spectrum IPVMS",
+        "description": "{motion_callback_help}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use SSL",
+          "verify_ssl": "Verify SSL certificate",
+          "username": "Username",
+          "password": "Password",
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      },
+      "rtsp": {
+        "title": "RTSP Streams",
+        "description": "{rtsp_help}",
+        "data": {
+          "enable_rtsp": "Enable RTSP",
+          "rtsp_main_stream": "Enable Main Stream (stream=0)",
+          "rtsp_sub_stream": "Enable Sub Stream (stream=1)"
+        },
+        "data_description": {
+          "enable_rtsp": "You'll get an MJPEG stream regardless of this option. Only enable RTSP if you need it — for example, to convert the feed to WebRTC format.",
+          "rtsp_main_stream": "Expose the full-resolution primary RTSP stream (stream=0).",
+          "rtsp_sub_stream": "Expose the lower-resolution secondary RTSP stream (stream=1)."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure DW Spectrum IPVMS",
+        "description": "{motion_callback_help}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use SSL",
+          "verify_ssl": "Verify SSL certificate",
+          "username": "Username",
+          "password": "Password",
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      },
+      "reconfigure_rtsp": {
+        "title": "Reconfigure RTSP Streams",
+        "description": "{rtsp_help}",
+        "data": {
+          "enable_rtsp": "Enable RTSP",
+          "rtsp_main_stream": "Enable Main Stream (stream=0)",
+          "rtsp_sub_stream": "Enable Sub Stream (stream=1)"
+        },
+        "data_description": {
+          "enable_rtsp": "You'll get an MJPEG stream regardless of this option. Only enable RTSP if you need it — for example, to convert the feed to WebRTC format.",
+          "rtsp_main_stream": "Expose the full-resolution primary RTSP stream (stream=0).",
+          "rtsp_sub_stream": "Expose the lower-resolution secondary RTSP stream (stream=1)."
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid username or password.",
+      "cannot_connect": "Could not connect to DW Spectrum.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This DW Spectrum server is already configured.",
+      "reconfigure_successful": "DW Spectrum has been reconfigured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "DW Spectrum options",
+        "menu_options": {
+          "connection": "Server connection",
+          "motion": "Motion callback",
+          "rtsp": "RTSP streams"
+        }
+      },
+      "connection": {
+        "title": "Configure DW Spectrum server",
+        "description": "{motion_callback_help}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use SSL",
+          "verify_ssl": "Verify SSL certificate",
+          "username": "Username",
+          "password": "Password",
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "password": "Leave blank to keep the saved password.",
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      },
+      "motion": {
+        "title": "DW Spectrum motion callback",
+        "description": "{motion_callback_help}",
+        "data": {
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      },
+      "rtsp": {
+        "title": "RTSP Streams",
+        "description": "{rtsp_help}",
+        "data": {
+          "enable_rtsp": "Enable RTSP",
+          "rtsp_main_stream": "Enable Main Stream (stream=0)",
+          "rtsp_sub_stream": "Enable Sub Stream (stream=1)"
+        },
+        "data_description": {
+          "enable_rtsp": "You'll get an MJPEG stream regardless of this option. Only enable RTSP if you need it — for example, to convert the feed to WebRTC format.",
+          "rtsp_main_stream": "Expose the full-resolution primary RTSP stream (stream=0).",
+          "rtsp_sub_stream": "Expose the lower-resolution secondary RTSP stream (stream=1)."
+        }
+      }
+    }
+  }
+}
