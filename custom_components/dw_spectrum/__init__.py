@@ -13,6 +13,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import config_validation as cv
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.components import websocket_api
 import aiohttp
@@ -35,6 +36,8 @@ from .coordinator import DwSpectrumCoordinator
 from .server_coordinator import DwSpectrumServerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 PLATFORMS: list[str] = ["camera", "sensor", "switch", "select", "button"]
 
