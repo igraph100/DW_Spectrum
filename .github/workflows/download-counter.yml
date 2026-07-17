@@ -1,0 +1,40 @@
+name: Update download counter
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-counter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute peak release downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '[.[] | ([.assets[].download_count] | add // 0)] | max // 0')
+          prev=$(jq '.value // 0' badge/peak_release_downloads.json 2>/dev/null || echo 0)
+          peak=$(( current > prev ? current : prev ))
+          echo "current=$current prev=$prev peak=$peak"
+          echo "{\"value\": $peak}" > badge/peak_release_downloads.json
+
+      - name: Commit if changed
+        run: |
+          if ! git diff --quiet badge/peak_release_downloads.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add badge/peak_release_downloads.json
+            git commit -m "Update peak release downloads badge"
+            git push
+          else
+            echo "No change"
+          fi
