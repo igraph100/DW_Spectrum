@@ -52,3 +52,9 @@ These sensors make it easy to monitor capacity at a glance and automate alerts w
 - Monitor license usage and get alerted when you're nearing your limit.
 - Quickly disable recording for specific cameras during maintenance.
 - Lock or unlock DW Spectrum user accounts from HA automations.
+
+## Home Assistant Lovelace Card
+
+We created a custom Lovelace frontend card for your Home Assistant dashboard.
+
+[Click here to download it](https://github.com/igraph100/dw_spectrum_playback_card)
