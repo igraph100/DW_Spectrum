@@ -4,6 +4,24 @@ This integration brings your **DW Spectrum / Digital Watchdog** system into Home
 
 ---
 
+## Installation
+
+### HACS (recommended)
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=igraph100&repository=DW_Spectrum&category=integration)
+
+1. Open **HACS** in Home Assistant.
+2. Search for **DW Spectrum IPVMS** and install it.
+   - If it isn't listed yet: **HACS → ⋮ (top right) → Custom repositories**, add `https://github.com/igraph100/DW_Spectrum` with category **Integration**, then install it.
+3. Restart Home Assistant.
+4. Go to **Settings → Devices & Services → Add Integration** and search for **DW Spectrum IPVMS**.
+
+### Manual
+
+1. Copy the `custom_components/dw_spectrum` folder from this repository into your Home Assistant `config/custom_components/` directory.
+2. Restart Home Assistant.
+3. Add the integration from **Settings → Devices & Services**.
+
 ## What you get
 
 ### Camera access in Home Assistant
