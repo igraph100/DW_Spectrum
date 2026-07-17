@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "DW Spectrum IPVMS",
+        "description": "{motion_callback_help}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use SSL",
+          "verify_ssl": "Verify SSL certificate",
+          "username": "Username",
+          "password": "Password",
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure DW Spectrum IPVMS",
+        "description": "{motion_callback_help}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use SSL",
+          "verify_ssl": "Verify SSL certificate",
+          "username": "Username",
+          "password": "Password",
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid username or password.",
+      "cannot_connect": "Could not connect to DW Spectrum.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This DW Spectrum server is already configured.",
+      "reconfigure_successful": "DW Spectrum has been reconfigured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "DW Spectrum options",
+        "menu_options": {
+          "connection": "Server connection",
+          "motion": "Motion callback"
+        }
+      },
+      "connection": {
+        "title": "Configure DW Spectrum server",
+        "description": "{motion_callback_help}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use SSL",
+          "verify_ssl": "Verify SSL certificate",
+          "username": "Username",
+          "password": "Password",
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "password": "Leave blank to keep the saved password.",
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      },
+      "motion": {
+        "title": "DW Spectrum motion callback",
+        "description": "{motion_callback_help}",
+        "data": {
+          "ha_callback_url": "Home Assistant callback URL"
+        },
+        "data_description": {
+          "ha_callback_url": "Optional. Required only for DW Spectrum motion sensors. Use a local or remote Home Assistant URL that the DW server can reach."
+        }
+      }
+    }
+  }
+}
