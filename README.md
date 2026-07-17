@@ -1,5 +1,7 @@
 # DW Spectrum (IPVMS) — Home Assistant Integration
 
+[![Peak Release Downloads](https://img.shields.io/badge/dynamic/json?style=for-the-badge&label=Peak%20Release%20Downloads&url=https%3A%2F%2Fraw.githubusercontent.com%2Figraph100%2FDW_Spectrum%2Fmain%2Fbadge%2Fpeak_release_downloads.json&query=%24.value&color=blue)](https://github.com/igraph100/DW_Spectrum/releases)
+
 This integration brings your **DW Spectrum / Digital Watchdog** system into Home Assistant so you can **view cameras**, **control recording behavior**, and **monitor system capacity** from one place.
 
 ---
