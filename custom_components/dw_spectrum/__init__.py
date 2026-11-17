@@ -313,7 +313,7 @@ class DwSpectrumMediaView(HomeAssistantView):
             else:
                 # Stream video for playback (potentially infinite / large)
                 stream_url = f"{api.base_url}/media/{cam_id}.mp4"
-                _LOGGER.warning("Media proxy: fetching %s params=%s", stream_url, {k: v for k, v in params.items() if k != "auth"})
+                _LOGGER.debug("Media proxy: fetching %s params=%s", stream_url, {k: v for k, v in params.items() if k != "auth"})
                 async with api._session.get(
                     stream_url,
                     params=params,
@@ -321,7 +321,7 @@ class DwSpectrumMediaView(HomeAssistantView):
                     timeout=aiohttp.ClientTimeout(total=None, connect=15),
                     **api._request_kwargs(),
                 ) as resp:
-                    _LOGGER.warning("Media proxy: DW responded %s for %s", resp.status, cam_id)
+                    _LOGGER.debug("Media proxy: DW responded %s for %s", resp.status, cam_id)
                     if resp.status not in (200, 206):
                         return web.Response(status=resp.status)
 
