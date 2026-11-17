@@ -1,6 +1,7 @@
 # DW Spectrum (IPVMS) — Home Assistant Integration
 
 [![Peak Release Downloads](https://img.shields.io/badge/dynamic/json?style=for-the-badge&label=Peak%20Release%20Downloads&url=https%3A%2F%2Fraw.githubusercontent.com%2Figraph100%2FDW_Spectrum%2Fmain%2Fbadge%2Fpeak_release_downloads.json&query=%24.value&color=blue)](https://github.com/igraph100/DW_Spectrum/releases)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
 
 This integration brings your **DW Spectrum / Digital Watchdog** system into Home Assistant so you can **view cameras**, **control recording behavior**, and **monitor system capacity** from one place.
 
@@ -10,13 +11,15 @@ This integration brings your **DW Spectrum / Digital Watchdog** system into Home
 
 ### HACS (recommended)
 
+DW Spectrum IPVMS is in the **default HACS store**, so there's no custom repository to add.
+
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=igraph100&repository=DW_Spectrum&category=integration)
 
 1. Open **HACS** in Home Assistant.
 2. Search for **DW Spectrum IPVMS** and install it.
-   - If it isn't listed yet: **HACS → ⋮ (top right) → Custom repositories**, add `https://github.com/igraph100/DW_Spectrum` with category **Integration**, then install it.
 3. Restart Home Assistant.
 4. Go to **Settings → Devices & Services → Add Integration** and search for **DW Spectrum IPVMS**.
+
 
 ### Manual
 
@@ -33,7 +36,7 @@ This integration brings your **DW Spectrum / Digital Watchdog** system into Home
 
 ### Live stream privacy control (per camera)
 - **"Block Live Stream in HA"** switch for each camera.
-- When enabled, Home Assistant will **not provide a stream URL** for that camera — ideal for privacy, bandwidth control, or preventing accidental viewing from dashboards.
+- When enabled, Home Assistant will **not provide any stream, video or snapshot** for that camera (camera entity, thumbnails, live video, archive and WebRTC) — ideal for privacy, bandwidth control, or preventing accidental viewing from dashboards.
 - This is **Home Assistant–side only** and does not change your DW Spectrum server settings.
 
 ### Recording controls (per camera)
@@ -75,6 +78,6 @@ These sensors make it easy to monitor capacity at a glance and automate alerts w
 
 ## Home Assistant Lovelace Card
 
-We created a custom Lovelace frontend card for your Home Assistant dashboard.
+We created a custom Lovelace frontend card for your Home Assistant dashboard: a camera grid, live view and archive playback with a timeline.
 
-[Click here to download it](https://github.com/igraph100/dw_spectrum_playback_card)
+[Click here to download it](https://github.com/igraph100/dw_spectrum_playback_card). Use card **V0.0.5 or later** with integration v0.3.8 or later.
