@@ -35,6 +35,14 @@ class DwSpectrumConfig:
     runtime_guid: str | None = None
 
 
+# Live thumbnails (card grid / live JPEG fallback / HA camera entity)
+THUMB_CACHE_TTL = 4.0        # s: a cached image is served as fresh for this long
+THUMB_STALE_WAIT = 1.5       # s: when DW is slow, wait this long, then serve the last image (stale)
+THUMB_STALE_MAX_AGE = 300.0  # s: never serve a stale image older than this
+THUMB_TIMEOUT = 8            # s: total timeout for one DW image request
+THUMB_FAIL_BACKOFF = 5.0     # s: after a failed DW request, don't ask DW again for this camera
+
+
 class DwSpectrumApi:
     """REST v3 client for DW Spectrum / Network Optix-based VMS."""
 
@@ -47,6 +55,12 @@ class DwSpectrumApi:
 
         self._token: str | None = None
         self._web_cookies: dict[str, str] = {}
+
+        # Per-camera thumbnail cache + one shared in-flight DW request per camera.
+        self._thumb_cache: dict[str, tuple[float, bytes]] = {}
+        self._thumb_inflight: dict[str, asyncio.Future] = {}
+        self._thumb_fail: dict[str, tuple[float, Exception]] = {}
+        self._thumb_round_method = "iFrameBefore"  # falls back to "precise" if DW rejects it
 
     @property
     def base_url(self) -> str:
@@ -499,42 +513,128 @@ class DwSpectrumApi:
             return data
         raise DwSpectrumConnectionError("Unexpected /rest/v3/devices/{id}/status response shape")
 
-    async def get_device_image(self, device_id: str) -> bytes | None:
-        # Normalize: strip surrounding braces that some DW versions include in IDs.
-        device_id = str(device_id or "").strip().strip("{}")
+    @staticmethod
+    def _norm_image_id(device_id: str) -> str:
+        # Strip surrounding braces that some DW versions include in IDs.
+        return str(device_id or "").strip().strip("{}")
+
+    async def get_device_image(self, device_id: str, *, _auth_retry: bool = True) -> bytes | None:
+        """Fetch one live thumbnail straight from DW (no cache).
+
+        Prefer get_device_image_cached(), which shares one DW request per
+        camera among all callers.  On 401/403 this logs in again and retries
+        exactly once; a second 401/403 is raised, never looped.
+        """
+        device_id = self._norm_image_id(device_id)
         token = await self.ensure_token()
         headers = {
             "Authorization": f"Bearer {token}",
             "accept": "image/jpeg,image/png,*/*",
             **({"x-runtime-guid": self._cfg.runtime_guid} if self._cfg.runtime_guid else {}),
         }
+        path = f"/rest/v4/devices/{device_id}/image"
+        round_method = self._thumb_round_method
         url = (
-            f"{self.base_url}/rest/v4/devices/{device_id}/image"
-            "?timestampMs=-1&format=jpg&roundMethod=precise&stream&size=426x240"
+            f"{self.base_url}{path}"
+            f"?timestampMs=-1&format=jpg&roundMethod={round_method}&stream&size=426x240"
         )
 
         try:
             async with self._session.get(
                 url,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=25),
+                timeout=aiohttp.ClientTimeout(total=THUMB_TIMEOUT),
                 **self._request_kwargs(),
             ) as resp:
                 if resp.status in (401, 403):
+                    if not _auth_retry:
+                        raise DwSpectrumAuthError(
+                            f"GET {path} -> HTTP {resp.status} (after re-login)"
+                        )
                     self._token = None
-                    await self.login()
-                    return await self.get_device_image(device_id)
+                    await self.login()  # raises DwSpectrumAuthError on bad credentials
+                    return await self.get_device_image(device_id, _auth_retry=False)
+
+                if (
+                    resp.status == 400
+                    and round_method != "precise"
+                    and self._thumb_round_method == round_method
+                ):
+                    body = (await resp.text()).strip()
+                    if "roundmethod" in body.lower():
+                        # Older DW build does not know iFrameBefore: use precise from now on.
+                        _LOGGER.debug("DW rejected roundMethod=%s, using precise: %s", round_method, body)
+                        self._thumb_round_method = "precise"
+                        return await self.get_device_image(device_id, _auth_retry=_auth_retry)
+                    raise DwSpectrumConnectionError(f"GET {path} -> HTTP {resp.status}: {body}")
 
                 if resp.status >= 400:
                     body = (await resp.text()).strip()
-                    raise DwSpectrumConnectionError(
-                        f"GET /rest/v3/devices/{device_id}/image -> HTTP {resp.status}: {body}"
-                    )
+                    raise DwSpectrumConnectionError(f"GET {path} -> HTTP {resp.status}: {body}")
 
                 return await resp.read()
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise DwSpectrumConnectionError(str(err)) from err
+            raise DwSpectrumConnectionError(f"GET {path}: {str(err) or type(err).__name__}") from err
+
+    async def _fetch_thumb_into_cache(self, device_id: str) -> bytes | None:
+        try:
+            img = await self.get_device_image(device_id)
+        except (DwSpectrumConnectionError, DwSpectrumAuthError) as err:
+            self._thumb_fail[device_id] = (time.monotonic(), err)
+            raise
+        self._thumb_fail.pop(device_id, None)
+        if img:
+            self._thumb_cache[device_id] = (time.monotonic(), img)
+        return img
+
+    async def get_device_image_cached(self, device_id: str) -> tuple[bytes | None, bool]:
+        """Return (image, stale) for a camera's live thumbnail.
+
+        * An image younger than THUMB_CACHE_TTL is returned without calling DW.
+        * Otherwise one DW request per camera is started and shared by every
+          caller that arrives while it runs.
+        * If DW has not answered after THUMB_STALE_WAIT (or fails) and an older
+          image exists, that image is returned with stale=True; the DW request
+          keeps running and refreshes the cache for the next caller.
+        """
+        device_id = self._norm_image_id(device_id)
+        now = time.monotonic()
+        cached = self._thumb_cache.get(device_id)
+        if cached and now - cached[0] < THUMB_CACHE_TTL:
+            return cached[1], False
+        usable_stale = cached if cached and now - cached[0] < THUMB_STALE_MAX_AGE else None
+
+        fut = self._thumb_inflight.get(device_id)
+        failed = self._thumb_fail.get(device_id)
+        if fut is None and failed and now - failed[0] < THUMB_FAIL_BACKOFF:
+            # DW just failed for this camera: don't hit it again yet.
+            if usable_stale is not None:
+                return usable_stale[1], True
+            raise failed[1]
+        if fut is None:
+            fut = asyncio.ensure_future(self._fetch_thumb_into_cache(device_id))
+            self._thumb_inflight[device_id] = fut
+
+            def _done(f: asyncio.Future, key: str = device_id) -> None:
+                if self._thumb_inflight.get(key) is f:
+                    del self._thumb_inflight[key]
+                if not f.cancelled():
+                    f.exception()  # mark as retrieved (no "never retrieved" warning)
+
+            fut.add_done_callback(_done)
+
+        if usable_stale is not None:
+            done, _ = await asyncio.wait({fut}, timeout=THUMB_STALE_WAIT)
+            if not done:
+                return usable_stale[1], True
+        try:
+            # shield: a browser that goes away must not cancel the shared request
+            return await asyncio.shield(fut), False
+        except (DwSpectrumConnectionError, DwSpectrumAuthError):
+            if usable_stale is not None:
+                return usable_stale[1], True
+            raise
 
     async def patch_device(self, device_id: str, body: dict[str, Any]) -> dict[str, Any]:
         data = await self._request_json("PATCH", f"/rest/v3/devices/{device_id}", json_body=body)

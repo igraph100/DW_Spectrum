@@ -127,6 +127,17 @@ def _now_ms() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
 
 
+def _norm_cam_id(camera_id: Any) -> str:
+    return str(camera_id or "").strip().strip("{}").lower()
+
+
+def _is_cam_stream_blocked(entry_data: dict[str, Any], camera_id: str) -> bool:
+    """True when the "Block Live Stream in HA" switch is on for this camera."""
+    cache = entry_data.get("stream_block_cache") or {}
+    want = _norm_cam_id(camera_id)
+    return any(bool(v) and _norm_cam_id(k) == want for k, v in cache.items())
+
+
 class DwSpectrumThumbnailView(HomeAssistantView):
     """HA-authenticated proxy that fetches a camera thumbnail from DW and returns it.
 
@@ -150,18 +161,25 @@ class DwSpectrumThumbnailView(HomeAssistantView):
         given    = str(request.rel_url.query.get("token") or "")
         if not expected or given != expected:
             return web.Response(status=403)
+        if _is_cam_stream_blocked(entry_data, camera_id):
+            return web.Response(status=403, text="Stream blocked for Home Assistant")
 
         api = entry_data.get("api")
         if not api:
             return web.Response(status=503)
         try:
-            img = await api.get_device_image(camera_id)
+            img, stale = await api.get_device_image_cached(camera_id)
             if not img:
                 return web.Response(status=404)
             return web.Response(
                 body=img,
                 content_type="image/jpeg",
-                headers={"Cache-Control": "no-cache"},
+                headers={
+                    # Short private cache: repeated requests for the same camera
+                    # within 3 s are answered by the browser itself.
+                    "Cache-Control": "private, max-age=1" if stale else "private, max-age=3",
+                    "X-DW-Thumbnail-Stale": "1" if stale else "0",
+                },
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Thumbnail proxy failed for camera %s: %s", camera_id, err)
@@ -197,8 +215,10 @@ class DwSpectrumMediaView(HomeAssistantView):
         expected = str(entry_data.get("media_token") or "")
         given    = str(request.rel_url.query.get("token") or "")
         if not expected or given != expected:
-            _LOGGER.warning("Media proxy 403: entry=%s expected_token=%s given_token=%s", entry_id, expected[:8] or "EMPTY", given[:8] or "EMPTY")
+            _LOGGER.warning("Media proxy 403: invalid media token for entry %s", entry_id)
             return web.Response(status=403)
+        if _is_cam_stream_blocked(entry_data, camera_id):
+            return web.Response(status=403, text="Stream blocked for Home Assistant")
 
         api = entry_data.get("api")
         if not api:
@@ -355,6 +375,8 @@ class DwSpectrumWebRTCProxyView(HomeAssistantView):
         given    = str(request.rel_url.query.get("token") or "")
         if not expected or given != expected:
             return web.Response(status=403)
+        if _is_cam_stream_blocked(entry_data, camera_id):
+            return web.Response(status=403, text="Stream blocked for Home Assistant")
 
         api = entry_data.get("api")
         if not api:
@@ -533,10 +555,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 )
 @websocket_api.async_response
 async def _ws_get_info(hass: HomeAssistant, connection, msg: dict) -> None:
-    """Return DW server URL, a live auth token, and camera list for each entry.
+    """Return the camera list and the media-proxy token for each entry.
 
-    The Lovelace playback card calls this on load so it never needs credentials
-    in its own YAML config — everything comes from the existing integration setup.
+    The Lovelace playback card calls this on load. It never receives DW
+    credentials or DW tokens: every image / video / WebRTC request goes through
+    the HA proxy views, which authenticate against DW on the server side.
     """
     requested_id = msg.get("entry_id")
     entries = hass.config_entries.async_entries(DOMAIN)
@@ -554,8 +577,6 @@ async def _ws_get_info(hass: HomeAssistant, connection, msg: dict) -> None:
         if not api:
             continue
         try:
-            token = await api.ensure_token()
-
             # Prefer the coordinator's already-cached data to avoid an extra round-trip.
             coordinator = entry_data.get("coordinator")
             raw_cameras: list[dict[str, Any]] = (
@@ -564,34 +585,23 @@ async def _ws_get_info(hass: HomeAssistant, connection, msg: dict) -> None:
                 else await api.get_cameras()
             )
 
-            stream_block_cache = entry_data.get("stream_block_cache") or {}
             cameras = [
                 {
                     "id": str(c.get("id", "")).strip().strip("{}"),
                     "name": str(c.get("name") or c.get("id") or ""),
-                    "stream_blocked": bool(stream_block_cache.get(str(c.get("id", "")).strip().strip("{}"))),
+                    "stream_blocked": _is_cam_stream_blocked(entry_data, c.get("id", "")),
                 }
                 for c in raw_cameras
                 if c.get("id")
             ]
             cameras.sort(key=lambda c: c["name"].lower())
 
-            # auth_param = base64(user:pass) — DW Spectrum accepts ?auth=<this>
-            # on all media/HLS URLs so the browser <video> element never needs to
-            # prompt for credentials.
-            auth_param = base64.b64encode(
-                f"{api._cfg.username}:{api._cfg.password}".encode()
-            ).decode()
-
             result.append(
                 {
-                    "entry_id":   entry.entry_id,
-                    "title":      entry.title,
-                    "dw_url":     api.base_url,
-                    "token":      token,
-                    "auth_param": auth_param,
+                    "entry_id":    entry.entry_id,
+                    "title":       entry.title,
                     "media_token": entry_data.get("media_token", ""),
-                    "cameras":    cameras,
+                    "cameras":     cameras,
                 }
             )
         except Exception as err:  # noqa: BLE001
@@ -835,8 +845,10 @@ async def _ws_get_footage_range(hass: HomeAssistant, connection, msg: dict) -> N
     {
         vol.Required("type"): "dw_spectrum/get_webrtc_ticket",
         vol.Required("entry_id"): str,
+        vol.Optional("camera_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def _ws_get_webrtc_ticket(hass: HomeAssistant, connection, msg: dict) -> None:
     """Return a short-lived vmsTicket for WebRTC WebSocket auth.
@@ -849,6 +861,10 @@ async def _ws_get_webrtc_ticket(hass: HomeAssistant, connection, msg: dict) -> N
     api = entry_data.get("api")
     if not api:
         connection.send_error(msg["id"], "not_found", "Entry not found or not yet loaded")
+        return
+    cam = msg.get("camera_id")
+    if cam and _is_cam_stream_blocked(entry_data, cam):
+        connection.send_error(msg["id"], "stream_blocked", "Stream blocked for Home Assistant")
         return
     try:
         ticket = await api.get_webrtc_ticket()

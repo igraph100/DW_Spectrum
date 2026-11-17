@@ -201,7 +201,8 @@ class DwSpectrumBaseCamera(CoordinatorEntity[DwSpectrumCoordinator], Camera):
         # If blocked, no thumbnail either (prevents any “preview”)
         if _is_stream_blocked(self._hass, self._entry, self._id):
             return None
-        return await self.coordinator.api.get_device_image(self._id)
+        img, _stale = await self.coordinator.api.get_device_image_cached(self._id)
+        return img
 
     def _handle_coordinator_update(self) -> None:
         # Update local device snapshot from coordinator data
